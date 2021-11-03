@@ -1,0 +1,786 @@
+---
+title: "Analisis American Time Use Survey"
+author: "David Rivera"
+date: "Octubre 2021"
+output: rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=9999)
+librerias = c("ggplot2","knitr","dplyr","corrplot","pROC","caret","rpart","fastDummies","factoextra","tidyr")
+sapply(librerias,library,character=TRUE)
+setwd("D:/Prueba Banco Atlantida/")
+atus = read.csv("atus.csv", header = TRUE, sep=",")
+
+```
+
+## Exploración de los datos
+
+Los datos generados por la encuesta recogen información demográfica y de uso del tiempo de personas residentes en Estados Unidos en distintas actividades. En la era de la información en que vivimos, muchas empresas compiten por captar la atención y tiempo de sus potenciales clientes. Sus acciones de publicidad o de estrategia comercial pueden ser mas efectivas si se centran en los segmentos de personas que tiene una mayor probabilidad de aceptar comprar el producto o crear una relación contractual de algún servicio. Y esa es precisamente la tarea que se desarrolla con las técnicas de agrupación en conglomerados en unir a individuos muy parecidos entre sí y separarlos de individuos muy diferentes. A continuación, se describe el proceso de formación de conglomerados que se utilizó en este ejemplo:
+
+### Conteo de datos nulos
+
+Se hace un conteo de los valores que estén perdidos y se procederá inputar si hace sentido logico hacerlo. En este set de datos solamente se encuentran valores perdidos en la columna "hours_worked", por lo que se se procedera rellenar los valores nulos con 0.
+
+```{r chunk_01}
+dfnulos = as.data.frame(colSums(is.na(atus)))
+colnames(dfnulos)<-c("nulos")
+kable(dfnulos  %>% arrange(desc(nulos)))
+atus$hours_worked[is.na(atus$hours_worked)] <- 0
+
+```
+
+### Tablas de frecuencias de variables categóricas
+
+```{r chunk_02,  fig.height = 4, fig.width = 4}
+var_categoricas = select(atus,state,gender,citizen,marital_stat,veteran,active_armedforces,emp_status,multi_jobs,work_class,retired,fulltime_emp,fam_income,household_child,phys_challenge)
+
+nom_categoricas = names(var_categoricas)
+
+for (n in nom_categoricas){
+  g_conteo = ggplot(data=var_categoricas, aes_string(x=n)) + geom_bar()
+  
+  print(g_conteo)
+} 
+
+
+
+```
+
+### Distribuciones de variables numéricas
+
+```{r chunk_03, fig.height = 4, fig.width = 4}
+
+var_numericas = select(atus,household_size,household_kids,hours_worked,travel,phone,volunteer,religion,sports,social,food,gov_civic,household,pro_services,purchasing,education,work,care_nonhousehold,care_household,household_chores,personal_care,sleep,groom,health_related,eating,class,homework,socializing)
+
+nom_numericas = names(var_numericas)
+
+for (n in nom_numericas){
+
+histograma = ggplot(var_numericas, aes_string(x = n)) + 
+  geom_histogram(aes(y=..density..),bins=30,color="Blue",  fill="lightblue", alpha=0.5, position="identity")  +
+  theme(legend.position="top") +
+  scale_color_brewer(palette="Dark2")
+
+print(histograma)
+
+
+}
+
+```
+
+### Correlaciones de variales numéricas
+
+```{r chunk_04, fig.height = 8, fig.width = 8}
+
+mc = cor(var_numericas)
+
+corrplot(mc,method="number", type="upper", order="hclust")
+
+
+```
+
+Se observan parejas de variables muy correladas (>0.8), de las cuales nos podemos quedar con solo una:
+
+social == socializing
+
+personal_care == sleep
+
+household_size == household_kids
+
+education == class
+
+food == eating
+
+```{r chunk_04_b, fig.height = 8, fig.width = 8}
+
+var_numericas = select(var_numericas, -social,-household_kids,-food,-class,-personal_care)
+
+
+```
+
+## Transformación de los datos
+
+Para realizar el análisis de cluster, se procede a  normalizar las variables numéricas de manera que estén todas en una misma escala, ya la categóricas se transforman en variables dummies/binarias. 
+
+Los niveles de la mayoría de las variables categoricas se cambiarán de valor para evitar espacios, caracteres espciales como "$" o valores muy largos para los niveles. Esto con el objetivo de faciliar la manipulacion de la data.
+
+No se utilizarán las variables categoricas, "state" por tener demasiadas categorias, lo mejor seria agrupar por zonas geográficas más grandes, tampoco "active_armedforces" porque solo hay un nivel para dicha variable.
+
+```{r chunk_05, fig.height = 8, fig.width = 8}
+
+norm_numericas = as.data.frame(scale(var_numericas))
+
+var_categoricas = select(var_categoricas,-state,-active_armedforces)
+
+dumm_cat = var_categoricas %>% mutate(
+  citizen = case_when(
+  citizen=="Foreign born, not US citizen" ~ "for_not",
+  citizen=="Foreign born, US citizen" ~ "for_usa",
+  citizen=="Native, born abroad" ~ "nat_abr",
+  citizen=="Native, Born in Territory" ~ "nat_terr",
+  citizen=="Native, Born in USA" ~ "nat_usa"
+  ),
+  marital_stat = case_when(
+    marital_stat=="Divored" ~ "divorced",
+    marital_stat=="Married" ~ "married",
+    marital_stat=="Never married" ~ "nev_marr",
+    marital_stat=="Separated" ~ "separated",
+    marital_stat=="Widowed" ~ "widowed"
+
+  ),
+  veteran = case_when(
+    veteran=="No answer" ~ "noanswer",
+    veteran=="Non-Veteran" ~ "no_vet",
+    veteran=="Veteran" ~ "veteran"
+
+  ),
+  emp_status = case_when(
+    emp_status=="Employed" ~ "employed",
+    emp_status=="Not in labor force" ~ "not_lab",
+    emp_status=="Unemployed, Laid off" ~ "ump_laid",
+    emp_status=="Unemployed, Looking" ~ "ump_look"
+
+  ),
+  multi_jobs = case_when(
+    multi_jobs=="No" ~ "no",
+    multi_jobs=="No answer" ~ "no_an",
+    multi_jobs=="Yes" ~ "yes"
+
+    
+  ),
+  work_class = case_when(
+    work_class=="Government, federal" ~ "gov_fed",
+    work_class=="Government, local" ~ "gov_loc",
+    work_class=="Government, state" ~ "gov_sta",
+    work_class=="No answer" ~ "no_ans",
+    work_class=="Private, for profit" ~ "prv_pro",
+    work_class=="Private, nonprofit" ~ "prv_non",
+    work_class=="Self-employed, incorporated" ~ "self_inc",
+    work_class=="Self-employed, unincorporated" ~ "self_uni",
+    work_class=="Without pay" ~ "no_pay"
+
+  ),
+  retired = case_when(
+    retired=="No answer" ~ "no_ans",
+    retired=="Not retired" ~ "not_ret",
+    retired=="Retired" ~ "retired",
+    retired=="Retired but working" ~ "r_work"
+
+  ),
+  
+  fulltime_emp = case_when(
+    fulltime_emp=="Full time" ~ "full",
+    fulltime_emp=="No answer" ~ "no_ans",
+    fulltime_emp=="Part time" ~ "part"
+
+  ),
+  
+  fam_income = case_when(
+    fam_income=="Less than $5,000" ~ "lev_1",
+    fam_income=="$5,000 to $7,499" ~ "lev_1",
+    fam_income=="$7,500 to $9,999" ~ "lev_1",
+    fam_income=="$10,000 to $12,499" ~ "lev_1",
+    fam_income=="$12,500 to $14,999" ~ "lev_2",
+    fam_income=="$15,000 to $19,999" ~ "lev_2",
+    fam_income=="$20,000 to $24,999" ~ "lev_2",
+    fam_income=="$25,000 to $29,999" ~ "lev_2",
+    fam_income=="$30,000 to $34,999" ~ "lev_3",
+    fam_income=="$35,000 to $39,999" ~ "lev_3",
+    fam_income=="$40,000 to $49,999" ~ "lev_3",
+    fam_income=="$50,000 to $59,999" ~ "lev_3",
+    fam_income=="$60,000 to $74,999" ~ "lev_4",
+    fam_income=="$75,000 to $99,999" ~ "lev_4",
+    fam_income=="$100,000 to $149,999" ~ "lev_4",
+    fam_income=="$150,000 and over" ~ "lev_4"
+
+  ),
+  phys_challenge = case_when(
+    phys_challenge=="Has difficulty" ~ "yes",
+    phys_challenge=="No difficulty" ~ "no"
+
+  )
+)
+
+
+dum_categoricas = dummy_cols(dumm_cat, select_columns = c("gender","citizen","marital_stat","veteran","emp_status","multi_jobs","work_class","retired","fulltime_emp","fam_income","household_child","phys_challenge"), remove_first_dummy =  TRUE)
+
+todas_dum_categoricas = dummy_cols(dumm_cat, select_columns = c("gender","citizen","marital_stat","veteran","emp_status","multi_jobs","work_class","retired","fulltime_emp","fam_income","household_child","phys_challenge"))
+
+dum_categoricas = dum_categoricas[,13:46]
+dum_eliminadas = select(todas_dum_categoricas,gender_Female,citizen_for_not,marital_stat_divorced,veteran_no_vet,emp_status_employed,multi_jobs_no,work_class_gov_fed,retired_no_ans,fulltime_emp_full,fam_income_lev_1,household_child_No,phys_challenge_no)
+
+dfmodelo = cbind(norm_numericas,dum_categoricas)
+
+```
+
+## Análisis de componente principales
+
+La cantidad de variables que se ingresan al modelo son 56 (incluyendo las dummies), por lo que se utilizará la técnica de Análisis de componentes principales para reducir la cantidad de variables, en lugar de variables tendremos combinaciones lineales que expliquen con un menor numero de dimensiones la varianza explicada.
+
+Se obserbar en la tabla de abajo que al seleccionar solo 13 componentes, se explica el 68% de la varianza.
+
+```{r chunk_06, fig.height = 12, fig.width = 12}
+
+
+acp_m = prcomp(dfmodelo,scale=FALSE)
+
+dfmodelo_comp = cbind(dfmodelo,acp_m$x[,1:13])
+
+acp_m.vp = get_eigenvalue(acp_m)
+
+kable(acp_m.vp)
+
+fviz_eig(acp_m,ncp=30,addlabes=FALSE)
+
+# fviz_pca_biplot(acp_m, axes=c(1,2), repel = TRUE,col.var = "#2E9FDF",col.ind = "#696969")
+
+
+
+```
+
+
+## Clustering por K Medias
+
+Se procede a realizar un análisis de conglomerados, se usa el metodo K medias. El metodo elige aleatoriamente centroides en base a las distancias y comienza a agrupar a los individuos cercanos al centroide. El parámetro de cuantos centroides se deben formar pueder ser decido arbitrariament por el investigador, pero se puede hacer una selección más objetiva utilizando un indicador de cohesión de los grupos que garantice la homogenidad entre elementos de un cluster y heterogenidad entre elementos de otro clusters.
+
+Se puede observar que la cantidad de optima de grupos para K medias es 3. Sin embargo, tambien se pueden probar armar 4 clusters por si hay una caraterizca de interés que separe la población encuestada.
+
+```{r chunk_08, fig.height = 8, fig.width = 8}
+
+fviz_nbclust(x = acp_m$x[,1:13], FUNcluster = kmeans, method = "silhouette", k.max = 15) +
+  labs(title = "Número óptimo de clusters con K Medias")
+
+
+set.seed(3234)
+kmeans3 = kmeans(acp_m$x[,1:13], 3, iter.max = 1000, nstart = 10)
+kmeans4 = kmeans(acp_m$x[,1:13], 4, iter.max = 1000, nstart = 10)
+
+
+```
+
+
+### Tamaño de los grupos al formar 3 clusters
+
+```{r chunk_09, fig.height = 6, fig.width = 7}
+
+clus3 = as.data.frame(table(kmeans3$cluster))
+colnames(clus3) = c("clusters","cantidad")
+kable(clus3)
+
+```
+
+### Tamaño de los grupos al formar 4 clusters
+
+```{r chunk_09_2, fig.height = 6, fig.width = 7}
+
+clus4 = as.data.frame(table(kmeans4$cluster))
+colnames(clus4) = c("clusters","cantidad")
+kable(clus4)
+
+```
+
+
+
+
+### Perfilamiento de los grupos (4 clusters)
+
+```{r chunk_11_a, include=FALSE, fig.height = 8, fig.width = 10}
+
+datos_completos = cbind(dfmodelo,dum_eliminadas,kmeans3$cluster)
+
+
+colnames(datos_completos)[69]="cluster"
+
+datos_medias = datos_completos%>% 
+  group_by(cluster) %>% 
+  summarise_all(list(mean))
+
+datos_escala = cbind(datos_medias$cluster,as.data.frame(apply(datos_medias[2:69], 2, function(x) (x - min(x))/(max(x)-min(x)))))
+colnames(datos_escala)[1]="cluster"
+
+
+
+datos_pivote = pivot_longer(data  = datos_escala[,1:11], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote$cluster = as.factor(datos_pivote$cluster)
+
+grafico1 = ggplot(datos_pivote) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 1/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+datos_pivote2 = pivot_longer(data  = datos_escala[,c(1,12:21)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote2$cluster = as.factor(datos_pivote2$cluster)
+
+grafico2 = ggplot(datos_pivote2) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 2/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+datos_pivote3 = pivot_longer(data  = datos_escala[,c(1,22:29)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote3$cluster = as.factor(datos_pivote3$cluster)
+
+grafico3 = ggplot(datos_pivote3) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 3/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+datos_pivote4 = pivot_longer(data  = datos_escala[,c(1,28:34)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote4$cluster = as.factor(datos_pivote4$cluster)
+
+grafico4 = ggplot(datos_pivote4) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 4/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+
+datos_pivote5 = pivot_longer(data  = datos_escala[,c(1,35:41)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote5$cluster = as.factor(datos_pivote5$cluster)
+
+grafico5 = ggplot(datos_pivote5) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 5/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote6 = pivot_longer(data  = datos_escala[,c(1,42:48)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote6$cluster = as.factor(datos_pivote6$cluster)
+
+grafico6 = ggplot(datos_pivote6) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 6/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote7 = pivot_longer(data  = datos_escala[,c(1,49:55)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote7$cluster = as.factor(datos_pivote7$cluster)
+
+grafico7 = ggplot(datos_pivote7) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 7/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote8 = pivot_longer(data  = datos_escala[,c(1,56:62)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote8$cluster = as.factor(datos_pivote8$cluster)
+
+grafico8 = ggplot(datos_pivote8) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 8/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote9 = pivot_longer(data  = datos_escala[,c(1,63:69)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote9$cluster = as.factor(datos_pivote9$cluster)
+
+grafico9 = ggplot(datos_pivote9) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 9/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+```
+
+```{r chunk_12_a, fig.height = 8, fig.width = 10}
+
+grafico1
+
+grafico2
+
+grafico3
+
+grafico4
+
+grafico5
+
+grafico6
+
+grafico7
+
+grafico8
+
+grafico9
+
+
+
+```
+
+
+### Perfilamiento de los grupos (4 clusters)
+
+```{r chunk_11, include=FALSE, fig.height = 8, fig.width = 10}
+
+datos_completos = cbind(dfmodelo,dum_eliminadas,kmeans4$cluster)
+
+
+colnames(datos_completos)[69]="cluster"
+
+datos_medias = datos_completos%>% 
+  group_by(cluster) %>% 
+  summarise_all(list(mean))
+
+datos_escala = cbind(datos_medias$cluster,as.data.frame(apply(datos_medias[2:69], 2, function(x) (x - min(x))/(max(x)-min(x)))))
+colnames(datos_escala)[1]="cluster"
+
+
+
+datos_pivote = pivot_longer(data  = datos_escala[,1:11], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote$cluster = as.factor(datos_pivote$cluster)
+
+grafico1 = ggplot(datos_pivote) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 1/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+datos_pivote2 = pivot_longer(data  = datos_escala[,c(1,12:21)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote2$cluster = as.factor(datos_pivote2$cluster)
+
+grafico2 = ggplot(datos_pivote2) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 2/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+datos_pivote3 = pivot_longer(data  = datos_escala[,c(1,22:29)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote3$cluster = as.factor(datos_pivote3$cluster)
+
+grafico3 = ggplot(datos_pivote3) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 3/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+datos_pivote4 = pivot_longer(data  = datos_escala[,c(1,28:34)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote4$cluster = as.factor(datos_pivote4$cluster)
+
+grafico4 = ggplot(datos_pivote4) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 4/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+
+datos_pivote5 = pivot_longer(data  = datos_escala[,c(1,35:41)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote5$cluster = as.factor(datos_pivote5$cluster)
+
+grafico5 = ggplot(datos_pivote5) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 5/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote6 = pivot_longer(data  = datos_escala[,c(1,42:48)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote6$cluster = as.factor(datos_pivote6$cluster)
+
+grafico6 = ggplot(datos_pivote6) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 6/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote7 = pivot_longer(data  = datos_escala[,c(1,49:55)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote7$cluster = as.factor(datos_pivote7$cluster)
+
+grafico7 = ggplot(datos_pivote7) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 7/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote8 = pivot_longer(data  = datos_escala[,c(1,56:62)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote8$cluster = as.factor(datos_pivote8$cluster)
+
+grafico8 = ggplot(datos_pivote8) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 8/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+datos_pivote9 = pivot_longer(data  = datos_escala[,c(1,63:69)], 
+                                   -cluster,
+                                   names_to = "variable",
+                                   values_to = "valor")
+
+datos_pivote9$cluster = as.factor(datos_pivote9$cluster)
+
+grafico9 = ggplot(datos_pivote9) + aes(x=variable,y=valor,color=cluster) + 
+  geom_point() + geom_line(aes(group = cluster)) +
+  scale_y_continuous(breaks = 1:10 ) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title="Diagrama de líneas de Cluster por Variable (Parte 9/9)",
+       x="Variable",y="") + 
+  scale_colour_discrete("Cluster")
+
+
+
+```
+
+```{r chunk_12, fig.height = 8, fig.width = 10}
+
+grafico1
+
+grafico2
+
+grafico3
+
+grafico4
+
+grafico5
+
+grafico6
+
+grafico7
+
+grafico8
+
+grafico9
+
+
+
+```
+
+
+
+
+## Clustering Jerarquico
+
+Al igual que con el metodo de K medias, evaluamos la silueta para validar el número optimo de grupos, sin embargo el MÁXIMO indicador de silueta alcanzado  es aprox 0.125 para 9 grupos, cuando en K media se logra el 0.20 con menos clusters. 
+
+```{r chunk_07, fig.height = 12, fig.width = 12}
+
+fviz_nbclust(x = acp_m$x[,1:13], FUNcluster = hcut, hc_method="ward.D", method = "silhouette", k.max = 15) +
+  labs(title = "Número óptimo de clusters con Clustering Jerarquico")
+
+```
+
+
+
+
+
+## Perfilamiento de los grupos
+
+A continuación se muestra la pefilacion de los grupos.
+
+```{r chunk_15, include= FALSE, fig.height = 4, fig.width = 4}
+
+dfatus = cbind(atus,kmeans3$cluster)
+colnames(dfatus)[45] = "cluster"
+
+dfatus$cluster = as.factor(dfatus$cluster)
+
+atus_medias = dfatus[,c(4,15,17,18,21:45)] %>% 
+  group_by(cluster) %>% 
+  summarise_all(list(mean))
+
+nom_numericas = colnames(dfatus[,c(4,15,17,18,21:45)])
+nom_categoricas = colnames(dfatus[,c(5:14,16,19,20,45)])
+
+```
+
+### medias y distribuciones de las variables numéricas por cluster.
+
+```{r chunk_16, fig.height = 4, fig.width = 4}
+
+
+kable(t(atus_medias), digits = 2)
+
+for (n in nom_numericas){
+
+boxplot = ggplot(dfatus[,c(4,15,17,18,21:45)], aes_string(x="cluster", y=n, color="cluster")) +
+  geom_boxplot()
+
+print(boxplot)
+
+
+}
+
+
+
+```
+
+
+
+### Distribuciones variables categóricas
+
+```{r chunk_17, fig.height = 4, fig.width = 8}
+
+
+
+for (n in nom_categoricas){
+
+
+dist_categoricas = ggplot(dfatus[,c(5:14,16,19,20,45)], aes_string(fill=n, x="cluster")) + 
+    geom_bar(position="dodge")
+
+
+print(dist_categoricas)
+
+
+}
+
+
+
+```
+
+## Características de los grupos
+
+A grandes rasgos, estas son las características de los 3 grupos formados:
+
+CLUSTER 1 (4,296 personas: 41%): Ciudadanos con una mayor edad (media 60), dedican mayor tiempo a socializar, realizar tareas domésticas, tienen una proporción mayor de mujeres, no están empleados, alta proporción de jubilados, sin niños en la casa y con una distribución más uniforme de ingresos. 
+
+CLUSTER 2 (5,871 personas: 56%: Ciudadanos jóvenes-adultos (media 44 años), con más horas de trabajo, con niños en casa, viajan con mayor tiempo, mayor igualad de proporción de hombres y mujeres, mayor proporción de casados, la mayoría están empleados, la mayoría trabaja en el sector privado, en este segmento se encuentras más personas con ingresos familiares altos por lo que dedican más tiempo a compras.
+
+CLUSTER 3 (326, 3%): Sector de población de jóvenes (media 22 años), mayoritariamente estudian, generan pocas compras, socializan menos que los otros grupos, son el grupo más pequeño.
+Dependiendo del objetivo o la estrategia comercial se puede seguir segmentando la población, pero estos grupos pueden ser un punto de partida para análisis más profundo de comportamientos.
+
+
+## Referencias Bibliográficas
+
+Chang, W. (2021). R Graphics Cookbook, 2nd edition. O'Reilly.
+
+Flores, J. S. (2021). Técnicas Multivariadas con R. Universidad Nacional Agraria La Molina.
+
+Statistics, U. B. (21 de 10 de 2021). American Time Use Survey Home Page. Obtenido de https://www.bls.gov/tus/home.htm
+
